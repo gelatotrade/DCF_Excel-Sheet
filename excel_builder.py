@@ -3,17 +3,17 @@ excel_builder.py
 ================
 Generates a professionally formatted Excel workbook containing:
 
-  Sheet 1: Dashboard         — Company overview, key metrics, scenario summary
-  Sheet 2: Income Statement  — Historical income statement data
-  Sheet 3: Balance Sheet     — Historical balance sheet data
-  Sheet 4: Cash Flow         — Historical cash flow data
-  Sheet 5: WACC              — Weighted Average Cost of Capital breakdown
-  Sheet 6: DCF Base Case     — Detailed base-case DCF model
-  Sheet 7: DCF Bull Case     — Rising sales & profit, falling rates
-  Sheet 8: DCF Bear Case     — Falling sales & profit, rising rates
-  Sheet 9: DCF Rising Rates  — Stable growth, aggressive rate hikes
-  Sheet 10: DCF Falling Rates — Stable growth, rate cuts
-  Sheet 11: Scenario Summary — Side-by-side comparison of all scenarios
+  Sheet 1: Dashboard         — Company overview, key metrics, scenario summary + charts
+  Sheet 2: Income Statement  — Historical income statement data + margin chart
+  Sheet 3: Balance Sheet     — Historical balance sheet data + structure chart
+  Sheet 4: Cash Flow         — Historical cash flow data + waterfall chart
+  Sheet 5: WACC              — WACC breakdown + capital structure pie + rate bar chart
+  Sheet 6: DCF Base Case     — Detailed base-case DCF model + projection chart
+  Sheet 7: DCF Bull Case     — Rising sales & profit, falling rates + projection chart
+  Sheet 8: DCF Bear Case     — Falling sales & profit, rising rates + projection chart
+  Sheet 9: DCF Rising Rates  — Stable growth, rate hikes + projection chart
+  Sheet 10: DCF Falling Rates — Stable growth, rate cuts + projection chart
+  Sheet 11: Scenario Summary — Side-by-side comparison + multi-chart page
   Sheet 12: Sensitivity      — WACC vs Terminal Growth sensitivity table
 """
 
@@ -22,8 +22,9 @@ from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side, numbers
 )
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.chart.series import SeriesLabel
+from openpyxl.chart import BarChart, LineChart, PieChart, AreaChart, Reference
+from openpyxl.chart.series import SeriesLabel, DataPoint
+from openpyxl.chart.label import DataLabelList
 from datetime import datetime
 
 
@@ -38,12 +39,16 @@ LIGHT_BLUE = "D6E4F0"
 ACCENT_GREEN = "27AE60"
 ACCENT_RED = "E74C3C"
 ACCENT_ORANGE = "F39C12"
+ACCENT_TEAL = "0097A7"
 WHITE = "FFFFFF"
 LIGHT_GRAY = "F2F2F2"
 MED_GRAY = "D9D9D9"
 DARK_TEXT = "1A1A1A"
 MONEY_GREEN = "E8F5E9"
 MONEY_RED = "FFEBEE"
+
+# Chart color palette (hex without #)
+CHART_COLORS = ["2E5090", "27AE60", "E74C3C", "F39C12", "0097A7", "8E24AA", "1B2A4A"]
 
 # Fonts
 TITLE_FONT = Font(name="Calibri", size=18, bold=True, color=WHITE)
@@ -174,12 +179,76 @@ def _write_kv(ws, row, col_label, label, col_val, value, fmt=None,
         c2.number_format = fmt
 
 
+def _style_chart(chart, width=28, height=14):
+    """Apply consistent styling to a chart."""
+    chart.width = width
+    chart.height = height
+    chart.legend.position = "b"
+
+
+def _color_series(chart, colors=None):
+    """Apply color palette to chart series."""
+    colors = colors or CHART_COLORS
+    from openpyxl.chart.shapes import GraphicalProperties
+    from openpyxl.drawing.fill import PatternFillProperties, ColorChoice
+    for i, series in enumerate(chart.series):
+        color = colors[i % len(colors)]
+        series.graphicalProperties.solidFill = color
+
+
+# ============================================================================
+# CHART BUILDERS (reusable)
+# ============================================================================
+
+def _make_bar_chart(ws, title, y_title, data_rows, cat_row, data_start_col,
+                    data_end_col, series_labels, anchor, width=28, height=14,
+                    chart_type="col"):
+    """Create and place a bar chart."""
+    chart = BarChart()
+    chart.type = chart_type
+    chart.style = 10
+    chart.title = title
+    chart.y_axis.title = y_title
+    _style_chart(chart, width, height)
+
+    cats = Reference(ws, min_col=data_start_col, max_col=data_end_col, min_row=cat_row)
+    for i, (row_idx, label) in enumerate(zip(data_rows, series_labels)):
+        data = Reference(ws, min_col=data_start_col, max_col=data_end_col, min_row=row_idx)
+        chart.add_data(data, from_rows=True, titles_from_data=False)
+        chart.series[i].tx = SeriesLabel(v=label)
+    chart.set_categories(cats)
+    _color_series(chart)
+    ws.add_chart(chart, anchor)
+    return chart
+
+
+def _make_line_chart(ws, title, y_title, data_rows, cat_row, data_start_col,
+                     data_end_col, series_labels, anchor, width=28, height=14):
+    """Create and place a line chart."""
+    chart = LineChart()
+    chart.style = 10
+    chart.title = title
+    chart.y_axis.title = y_title
+    _style_chart(chart, width, height)
+
+    cats = Reference(ws, min_col=data_start_col, max_col=data_end_col, min_row=cat_row)
+    for i, (row_idx, label) in enumerate(zip(data_rows, series_labels)):
+        data = Reference(ws, min_col=data_start_col, max_col=data_end_col, min_row=row_idx)
+        chart.add_data(data, from_rows=True, titles_from_data=False)
+        chart.series[i].tx = SeriesLabel(v=label)
+        chart.series[i].graphicalProperties.line.width = 22000  # ~2pt
+    chart.set_categories(cats)
+    _color_series(chart)
+    ws.add_chart(chart, anchor)
+    return chart
+
+
 # ============================================================================
 # SHEET BUILDERS
 # ============================================================================
 
 def build_dashboard(wb, stock, financials, rates, model_result, data_source):
-    """Sheet 1: Company overview dashboard."""
+    """Sheet 1: Company overview dashboard with multiple charts."""
     ws = wb.active
     ws.title = "Dashboard"
     ws.sheet_properties.tabColor = DARK_BLUE
@@ -321,47 +390,82 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
     note.font = Font(name="Calibri", size=10, italic=True, color="666666")
     note.alignment = WRAP
 
-    # Add chart
-    _add_dashboard_chart(ws, financials, start_row=33)
-
-
-def _add_dashboard_chart(ws, financials, start_row=33):
-    """Add a revenue/FCF bar chart to the dashboard."""
-    # Write chart data in a hidden area
-    dr = start_row + 12  # data rows below chart
+    # ===== CHARTS =====
     years = financials["years"]
-    ws.cell(row=dr, column=1, value="Year")
-    ws.cell(row=dr + 1, column=1, value="Revenue ($B)")
-    ws.cell(row=dr + 2, column=1, value="FCF ($B)")
+    n_years = len(years)
+    # Chart data area starts below the visible content
+    cd = 50  # chart data start row
 
+    # -- Chart 1: Revenue vs FCF bar chart --
+    ws.cell(row=cd, column=1, value="Year")
+    ws.cell(row=cd + 1, column=1, value="Revenue ($B)")
+    ws.cell(row=cd + 2, column=1, value="Free Cash Flow ($B)")
+    ws.cell(row=cd + 3, column=1, value="Net Income ($B)")
     for i, yr in enumerate(years):
-        ws.cell(row=dr, column=2 + i, value=yr)
-        ws.cell(row=dr + 1, column=2 + i, value=financials["revenue"][i] / 1e9)
-        ws.cell(row=dr + 2, column=2 + i, value=financials["free_cash_flow"][i] / 1e9)
+        ws.cell(row=cd, column=2 + i, value=yr)
+        ws.cell(row=cd + 1, column=2 + i, value=financials["revenue"][i] / 1e9)
+        ws.cell(row=cd + 2, column=2 + i, value=financials["free_cash_flow"][i] / 1e9)
+        ws.cell(row=cd + 3, column=2 + i, value=financials["net_income"][i] / 1e9)
 
-    chart = BarChart()
-    chart.type = "col"
-    chart.style = 10
-    chart.title = "Revenue vs Free Cash Flow ($B)"
-    chart.y_axis.title = "$ Billions"
-    chart.x_axis.title = "Fiscal Year"
-    chart.width = 28
-    chart.height = 14
+    _make_bar_chart(ws, "Revenue vs FCF vs Net Income ($B)", "$ Billions",
+                    [cd + 1, cd + 2, cd + 3], cd, 2, 1 + n_years,
+                    ["Revenue", "Free Cash Flow", "Net Income"],
+                    "A33", width=28, height=14)
 
-    cats = Reference(ws, min_col=2, max_col=1 + len(years), min_row=dr)
-    rev_data = Reference(ws, min_col=2, max_col=1 + len(years), min_row=dr + 1)
-    fcf_data = Reference(ws, min_col=2, max_col=1 + len(years), min_row=dr + 2)
+    # -- Chart 2: Profitability margins line chart --
+    ws.cell(row=cd + 5, column=1, value="Year")
+    ws.cell(row=cd + 6, column=1, value="Gross Margin")
+    ws.cell(row=cd + 7, column=1, value="Operating Margin")
+    ws.cell(row=cd + 8, column=1, value="Net Margin")
+    ws.cell(row=cd + 9, column=1, value="FCF Margin")
+    for i, yr in enumerate(years):
+        rev = financials["revenue"][i] or 1
+        ws.cell(row=cd + 5, column=2 + i, value=yr)
+        ws.cell(row=cd + 6, column=2 + i, value=financials["gross_profit"][i] / rev)
+        ws.cell(row=cd + 7, column=2 + i, value=financials["operating_income"][i] / rev)
+        ws.cell(row=cd + 8, column=2 + i, value=financials["net_income"][i] / rev)
+        ws.cell(row=cd + 9, column=2 + i, value=financials["free_cash_flow"][i] / rev)
 
-    chart.add_data(rev_data, from_rows=True, titles_from_data=False)
-    chart.add_data(fcf_data, from_rows=True, titles_from_data=False)
-    chart.set_categories(cats)
-    chart.series[0].tx = SeriesLabel(v="Revenue ($B)")
-    chart.series[1].tx = SeriesLabel(v="FCF ($B)")
+    chart2 = _make_line_chart(ws, "Profitability Margins Over Time", "Margin %",
+                              [cd + 6, cd + 7, cd + 8, cd + 9], cd + 5, 2, 1 + n_years,
+                              ["Gross Margin", "Operating Margin", "Net Margin", "FCF Margin"],
+                              "F33", width=24, height=14)
+    chart2.y_axis.numFmt = '0%'
 
-    ws.add_chart(chart, f"A{start_row}")
+    # -- Chart 3: Scenario implied price bar chart --
+    ws.cell(row=cd + 11, column=1, value="Scenario")
+    ws.cell(row=cd + 12, column=1, value="Implied Price ($)")
+    ws.cell(row=cd + 13, column=1, value="Current Price ($)")
+    for i, key in enumerate(scenario_order):
+        dcf = model_result["scenarios"][key]["dcf"]
+        ws.cell(row=cd + 11, column=2 + i, value=dcf["scenario"])
+        ws.cell(row=cd + 12, column=2 + i, value=dcf["implied_share_price"])
+        ws.cell(row=cd + 13, column=2 + i, value=dcf["current_price"])
+
+    _make_bar_chart(ws, "Implied Share Price by Scenario", "Price ($)",
+                    [cd + 12, cd + 13], cd + 11, 2, 1 + len(scenario_order),
+                    ["Implied Price", "Current Price"],
+                    "A49", width=28, height=14)
+
+    # -- Chart 4: WACC components stacked view --
+    ws.cell(row=cd + 15, column=1, value="Scenario")
+    ws.cell(row=cd + 16, column=1, value="WACC (%)")
+    ws.cell(row=cd + 17, column=1, value="Terminal Growth (%)")
+    for i, key in enumerate(scenario_order):
+        dcf = model_result["scenarios"][key]["dcf"]
+        ws.cell(row=cd + 15, column=2 + i, value=dcf["scenario"])
+        ws.cell(row=cd + 16, column=2 + i, value=dcf["wacc"])
+        ws.cell(row=cd + 17, column=2 + i, value=dcf["terminal_growth"])
+
+    chart4 = _make_bar_chart(ws, "WACC vs Terminal Growth by Scenario", "Rate",
+                             [cd + 16, cd + 17], cd + 15, 2, 1 + len(scenario_order),
+                             ["WACC", "Terminal Growth"],
+                             "F49", width=24, height=14)
+    chart4.y_axis.numFmt = '0.0%'
 
 
-def build_financial_statement_sheet(wb, sheet_name, financials, items, tab_color):
+def build_financial_statement_sheet(wb, sheet_name, financials, items, tab_color,
+                                    chart_config=None):
     """Generic builder for income statement / balance sheet / cash flow sheets."""
     ws = wb.create_sheet(title=sheet_name)
     ws.sheet_properties.tabColor = tab_color
@@ -378,12 +482,10 @@ def build_financial_statement_sheet(wb, sheet_name, financials, items, tab_color
     row = 2
     _write_header_row(ws, row, ["Line Item"] + years)
 
-    current_section = None
     for i, (label, key, fmt, is_section) in enumerate(items):
         row += 1
         if is_section:
             _write_section_header(ws, row, label, max_col)
-            current_section = label
             continue
 
         vals = financials.get(key, [0] * len(years))
@@ -395,6 +497,49 @@ def build_financial_statement_sheet(wb, sheet_name, financials, items, tab_color
         _write_data_row(ws, row, label, vals, fmt=fmt, alt=alt,
                         label_font=BOLD_VALUE if bold else LABEL_FONT,
                         value_font=BOLD_VALUE if bold else VALUE_FONT)
+
+    # Add chart if config provided
+    if chart_config:
+        _add_statement_chart(ws, financials, row + 2, chart_config)
+
+    return ws
+
+
+def _add_statement_chart(ws, financials, start_row, config):
+    """Add a chart to a financial statement sheet."""
+    years = financials["years"]
+    n = len(years)
+    cd = start_row + 16  # data area below chart
+
+    ws.cell(row=cd, column=1, value="Year")
+    for i, yr in enumerate(years):
+        ws.cell(row=cd, column=2 + i, value=yr)
+
+    data_rows = []
+    labels = []
+    for offset, (key, label, divisor) in enumerate(config["series"]):
+        r = cd + 1 + offset
+        ws.cell(row=r, column=1, value=label)
+        vals = financials.get(key, [0] * n)
+        for i, v in enumerate(vals):
+            ws.cell(row=r, column=2 + i, value=(v or 0) / divisor)
+        data_rows.append(r)
+        labels.append(label)
+
+    chart_type = config.get("chart_type", "bar")
+    if chart_type == "line":
+        chart = _make_line_chart(ws, config["title"], config["y_title"],
+                                 data_rows, cd, 2, 1 + n, labels,
+                                 f"A{start_row}", width=28, height=14)
+    else:
+        chart = _make_bar_chart(ws, config["title"], config["y_title"],
+                                data_rows, cd, 2, 1 + n, labels,
+                                f"A{start_row}", width=28, height=14)
+
+    if config.get("pct_format"):
+        chart.y_axis.numFmt = '0%'
+
+    return chart
 
 
 def build_income_statement(wb, financials):
@@ -410,7 +555,39 @@ def build_income_statement(wb, financials):
         ("=Net Income", "net_income", FMT_DOLLAR_B, False),
         ("Depreciation & Amortization", "depreciation", FMT_DOLLAR_B, False),
     ]
-    build_financial_statement_sheet(wb, "Income Statement", financials, items, MED_BLUE)
+    chart_cfg = {
+        "title": "Revenue, Gross Profit & Net Income ($B)",
+        "y_title": "$ Billions",
+        "series": [
+            ("revenue", "Revenue ($B)", 1e9),
+            ("gross_profit", "Gross Profit ($B)", 1e9),
+            ("operating_income", "Operating Income ($B)", 1e9),
+            ("net_income", "Net Income ($B)", 1e9),
+        ],
+    }
+    ws = build_financial_statement_sheet(wb, "Income Statement", financials, items,
+                                         MED_BLUE, chart_cfg)
+
+    # Add margin chart below
+    years = financials["years"]
+    n = len(years)
+    cd2 = 40
+    ws.cell(row=cd2, column=1, value="Year")
+    ws.cell(row=cd2 + 1, column=1, value="Gross Margin")
+    ws.cell(row=cd2 + 2, column=1, value="Operating Margin")
+    ws.cell(row=cd2 + 3, column=1, value="Net Margin")
+    for i, yr in enumerate(years):
+        rev = financials["revenue"][i] or 1
+        ws.cell(row=cd2, column=2 + i, value=yr)
+        ws.cell(row=cd2 + 1, column=2 + i, value=financials["gross_profit"][i] / rev)
+        ws.cell(row=cd2 + 2, column=2 + i, value=financials["operating_income"][i] / rev)
+        ws.cell(row=cd2 + 3, column=2 + i, value=financials["net_income"][i] / rev)
+
+    mc = _make_line_chart(ws, "Profit Margins Over Time", "Margin",
+                          [cd2 + 1, cd2 + 2, cd2 + 3], cd2, 2, 1 + n,
+                          ["Gross Margin", "Operating Margin", "Net Margin"],
+                          "D14", width=24, height=14)
+    mc.y_axis.numFmt = '0%'
 
 
 def build_balance_sheet(wb, financials):
@@ -425,7 +602,38 @@ def build_balance_sheet(wb, financials):
         ("=Total Liabilities", "total_liabilities", FMT_DOLLAR_B, False),
         ("=Total Stockholders' Equity", "total_equity", FMT_DOLLAR_B, False),
     ]
-    build_financial_statement_sheet(wb, "Balance Sheet", financials, items, "2E7D32")
+    chart_cfg = {
+        "title": "Balance Sheet Structure ($B)",
+        "y_title": "$ Billions",
+        "series": [
+            ("total_assets", "Total Assets ($B)", 1e9),
+            ("total_liabilities", "Total Liabilities ($B)", 1e9),
+            ("total_equity", "Total Equity ($B)", 1e9),
+            ("total_debt", "Total Debt ($B)", 1e9),
+        ],
+    }
+    ws = build_financial_statement_sheet(wb, "Balance Sheet", financials, items,
+                                         "2E7D32", chart_cfg)
+
+    # Add Debt-to-Equity ratio line chart
+    years = financials["years"]
+    n = len(years)
+    cd2 = 42
+    ws.cell(row=cd2, column=1, value="Year")
+    ws.cell(row=cd2 + 1, column=1, value="Debt-to-Equity Ratio")
+    ws.cell(row=cd2 + 2, column=1, value="Current Ratio")
+    for i, yr in enumerate(years):
+        eq = financials["total_equity"][i] or 1
+        cl = financials["current_liabilities"][i] or 1
+        ws.cell(row=cd2, column=2 + i, value=yr)
+        ws.cell(row=cd2 + 1, column=2 + i, value=financials["total_debt"][i] / eq)
+        ws.cell(row=cd2 + 2, column=2 + i, value=financials["current_assets"][i] / cl)
+
+    rc = _make_line_chart(ws, "Key Ratios Over Time", "Ratio",
+                          [cd2 + 1, cd2 + 2], cd2, 2, 1 + n,
+                          ["Debt-to-Equity", "Current Ratio"],
+                          "D13", width=24, height=14)
+    rc.y_axis.numFmt = '0.00x'
 
 
 def build_cash_flow(wb, financials):
@@ -437,11 +645,39 @@ def build_cash_flow(wb, financials):
         ("Change in Working Capital", "change_in_working_capital", FMT_DOLLAR_B, False),
         ("=Free Cash Flow (OCF + CapEx)", "free_cash_flow", FMT_DOLLAR_B, False),
     ]
-    build_financial_statement_sheet(wb, "Cash Flow", financials, items, ACCENT_ORANGE)
+    chart_cfg = {
+        "title": "Cash Flow Components ($B)",
+        "y_title": "$ Billions",
+        "series": [
+            ("operating_cash_flow", "Operating CF ($B)", 1e9),
+            ("free_cash_flow", "Free Cash Flow ($B)", 1e9),
+        ],
+    }
+    ws = build_financial_statement_sheet(wb, "Cash Flow", financials, items,
+                                         ACCENT_ORANGE, chart_cfg)
+
+    # Add FCF conversion chart
+    years = financials["years"]
+    n = len(years)
+    cd2 = 36
+    ws.cell(row=cd2, column=1, value="Year")
+    ws.cell(row=cd2 + 1, column=1, value="FCF Yield (FCF/Revenue)")
+    ws.cell(row=cd2 + 2, column=1, value="CapEx % of Revenue")
+    for i, yr in enumerate(years):
+        rev = financials["revenue"][i] or 1
+        ws.cell(row=cd2, column=2 + i, value=yr)
+        ws.cell(row=cd2 + 1, column=2 + i, value=financials["free_cash_flow"][i] / rev)
+        ws.cell(row=cd2 + 2, column=2 + i, value=abs(financials["capex"][i]) / rev)
+
+    fc = _make_line_chart(ws, "FCF Yield & CapEx Intensity", "% of Revenue",
+                          [cd2 + 1, cd2 + 2], cd2, 2, 1 + n,
+                          ["FCF Yield", "CapEx Intensity"],
+                          "D10", width=24, height=14)
+    fc.y_axis.numFmt = '0%'
 
 
 def build_wacc_sheet(wb, wacc_data, stock, financials, rates):
-    """Sheet 5: WACC breakdown."""
+    """Sheet 5: WACC breakdown with charts."""
     ws = wb.create_sheet(title="WACC")
     ws.sheet_properties.tabColor = "8E24AA"  # purple
     max_col = 6
@@ -453,15 +689,15 @@ def build_wacc_sheet(wb, wacc_data, stock, financials, rates):
 
     # WACC Formula
     row = 3
-    _write_section_header(ws, row, "WACC = (E/V) × Re  +  (D/V) × Rd × (1 − T)", max_col)
+    _write_section_header(ws, row, "WACC = (E/V) x Re  +  (D/V) x Rd x (1 - T)", max_col)
 
     # Cost of Equity (CAPM)
     row = 5
-    _write_section_header(ws, row, "COST OF EQUITY  (CAPM: Re = Rf + β × ERP)", max_col)
+    _write_section_header(ws, row, "COST OF EQUITY  (CAPM: Re = Rf + B x ERP)", max_col)
 
     capm_items = [
         ("Risk-Free Rate (Rf)", wacc_data["risk_free_rate"], FMT_PCT2),
-        ("Beta (β)", wacc_data["beta"], "0.00"),
+        ("Beta (B)", wacc_data["beta"], "0.00"),
         ("Equity Risk Premium (ERP)", wacc_data["equity_risk_premium"], FMT_PCT2),
         ("Cost of Equity (Re)", wacc_data["cost_of_equity"], FMT_PCT2),
     ]
@@ -515,16 +751,106 @@ def build_wacc_sheet(wb, wacc_data, stock, financials, rates):
         ("10-Year Treasury Yield", rates["treasury_10y"], FMT_PCT2),
         ("2-Year Treasury Yield", rates["treasury_2y"], FMT_PCT2),
         ("Federal Funds Rate", rates["fed_funds_rate"], FMT_PCT2),
-        ("Yield Curve Spread (10Y − 2Y)", rates["treasury_10y"] - rates["treasury_2y"], FMT_PCT2),
+        ("Yield Curve Spread (10Y - 2Y)", rates["treasury_10y"] - rates["treasury_2y"], FMT_PCT2),
         ("Data Retrieved", rates["date_fetched"], None),
     ]
     for i, (label, val, fmt) in enumerate(rate_items):
         r = row + 1 + i
         _write_kv(ws, r, 1, label, 2, val, fmt)
 
+    # ===== CHARTS =====
+
+    # -- Chart 1: Capital Structure Pie Chart --
+    cd = 45
+    ws.cell(row=cd, column=1, value="Component")
+    ws.cell(row=cd + 1, column=1, value="Equity")
+    ws.cell(row=cd + 2, column=1, value="Debt")
+    ws.cell(row=cd, column=2, value="Value ($B)")
+    ws.cell(row=cd + 1, column=2, value=wacc_data["equity_value"] / 1e9)
+    ws.cell(row=cd + 2, column=2, value=wacc_data["debt_value"] / 1e9)
+
+    pie = PieChart()
+    pie.title = "Capital Structure (Equity vs Debt)"
+    pie.style = 10
+    pie.width = 16
+    pie.height = 14
+    data_ref = Reference(ws, min_col=2, max_col=2, min_row=cd, max_row=cd + 2)
+    cats_ref = Reference(ws, min_col=1, max_col=1, min_row=cd + 1, max_row=cd + 2)
+    pie.add_data(data_ref, titles_from_data=True)
+    pie.set_categories(cats_ref)
+    # Color the pie slices
+    s = pie.series[0]
+    pt0 = DataPoint(idx=0)
+    pt0.graphicalProperties.solidFill = MED_BLUE
+    pt1 = DataPoint(idx=1)
+    pt1.graphicalProperties.solidFill = ACCENT_ORANGE
+    s.data_points = [pt0, pt1]
+    s.dLbls = DataLabelList()
+    s.dLbls.showPercent = True
+    ws.add_chart(pie, "D5")
+
+    # -- Chart 2: WACC Components Bar Chart --
+    ws.cell(row=cd + 4, column=1, value="Component")
+    ws.cell(row=cd + 5, column=1, value="Rate (%)")
+    components = [
+        ("Risk-Free Rate", wacc_data["risk_free_rate"]),
+        ("Cost of Equity", wacc_data["cost_of_equity"]),
+        ("Cost of Debt", wacc_data["cost_of_debt"]),
+        ("After-Tax CoD", wacc_data["cost_of_debt"] * (1 - wacc_data["tax_rate"])),
+        ("WACC", wacc_data["wacc"]),
+    ]
+    for j, (name, val) in enumerate(components):
+        ws.cell(row=cd + 4, column=2 + j, value=name)
+        ws.cell(row=cd + 5, column=2 + j, value=val)
+
+    chart_w = BarChart()
+    chart_w.type = "col"
+    chart_w.style = 10
+    chart_w.title = "WACC Component Rates"
+    chart_w.y_axis.title = "Rate"
+    chart_w.y_axis.numFmt = '0.0%'
+    _style_chart(chart_w, 24, 14)
+
+    cats_w = Reference(ws, min_col=2, max_col=1 + len(components), min_row=cd + 4)
+    data_w = Reference(ws, min_col=2, max_col=1 + len(components), min_row=cd + 5)
+    chart_w.add_data(data_w, from_rows=True, titles_from_data=False)
+    chart_w.set_categories(cats_w)
+    chart_w.series[0].tx = SeriesLabel(v="Rate")
+    _color_series(chart_w)
+    ws.add_chart(chart_w, "D19")
+
+    # -- Chart 3: Interest Rate Environment Bar --
+    ws.cell(row=cd + 7, column=1, value="Rate")
+    ws.cell(row=cd + 8, column=1, value="Yield (%)")
+    rate_bars = [
+        ("Fed Funds", rates["fed_funds_rate"]),
+        ("2Y Treasury", rates["treasury_2y"]),
+        ("10Y Treasury", rates["treasury_10y"]),
+        ("WACC", wacc_data["wacc"]),
+    ]
+    for j, (name, val) in enumerate(rate_bars):
+        ws.cell(row=cd + 7, column=2 + j, value=name)
+        ws.cell(row=cd + 8, column=2 + j, value=val)
+
+    chart_r = BarChart()
+    chart_r.type = "col"
+    chart_r.style = 10
+    chart_r.title = "Rate Environment: Treasury Yields vs WACC"
+    chart_r.y_axis.title = "Rate"
+    chart_r.y_axis.numFmt = '0.0%'
+    _style_chart(chart_r, 24, 14)
+
+    cats_r = Reference(ws, min_col=2, max_col=1 + len(rate_bars), min_row=cd + 7)
+    data_r = Reference(ws, min_col=2, max_col=1 + len(rate_bars), min_row=cd + 8)
+    chart_r.add_data(data_r, from_rows=True, titles_from_data=False)
+    chart_r.set_categories(cats_r)
+    chart_r.series[0].tx = SeriesLabel(v="Yield")
+    _color_series(chart_r)
+    ws.add_chart(chart_r, "A35")
+
 
 def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
-    """Build a detailed DCF sheet for one scenario."""
+    """Build a detailed DCF sheet for one scenario with projection charts."""
     sc_data = model_result["scenarios"][scenario_key]
     scenario = sc_data["scenario"]
     proj = sc_data["projection"]
@@ -533,7 +859,7 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
 
     tab_colors = {
         "base": MED_BLUE, "bull": ACCENT_GREEN, "bear": ACCENT_RED,
-        "rate_hike": ACCENT_ORANGE, "rate_cut": "0097A7",
+        "rate_hike": ACCENT_ORANGE, "rate_cut": ACCENT_TEAL,
     }
     sheet_names = {
         "base": "DCF Base Case", "bull": "DCF Bull Case", "bear": "DCF Bear Case",
@@ -555,7 +881,7 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
 
     # Title
     row = 1
-    _write_title_row(ws, row, f"  DCF MODEL — {scenario.name.upper()}", max_col)
+    _write_title_row(ws, row, f"  DCF MODEL  —  {scenario.name.upper()}", max_col)
     row = 2
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max_col)
     cell = ws.cell(row=row, column=1, value=f"  {scenario.description}")
@@ -580,10 +906,10 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
 
     # Historical + Projected FCF
     row = 12
-    _write_section_header(ws, row, "HISTORICAL  ←→  PROJECTED", max_col)
+    _write_section_header(ws, row, "HISTORICAL  <-->  PROJECTED", max_col)
 
     row = 13
-    header_labels = [""] + hist_years + ["→"] + proj_years + ["Terminal"]
+    header_labels = [""] + hist_years + ["->"] + proj_years + ["Terminal"]
     _write_header_row(ws, row, header_labels)
 
     # Revenue
@@ -619,7 +945,7 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
     hist_nopat = [financials["operating_income"][i] * (1 - proj["tax_rate"]) for i in range(len(hist_years))]
     proj_nopat = proj["projected_nopat"]
     term_nopat = proj_nopat[-1] * (1 + dcf["terminal_growth"])
-    _write_data_row(ws, row, "NOPAT (EBIT × (1-T))", hist_nopat + [None] + proj_nopat + [term_nopat], fmt=FMT_DOLLAR_B)
+    _write_data_row(ws, row, "NOPAT (EBIT x (1-T))", hist_nopat + [None] + proj_nopat + [term_nopat], fmt=FMT_DOLLAR_B)
 
     # D&A
     row = 19
@@ -633,7 +959,7 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
     hist_capex = [abs(c) for c in financials["capex"]]
     proj_capex = proj["projected_capex"]
     term_capex = proj_capex[-1] * (1 + dcf["terminal_growth"])
-    _write_data_row(ws, row, "(−) Capital Expenditure", hist_capex + [None] + proj_capex + [term_capex], fmt=FMT_DOLLAR_B)
+    _write_data_row(ws, row, "(-) Capital Expenditure", hist_capex + [None] + proj_capex + [term_capex], fmt=FMT_DOLLAR_B)
 
     # FCF
     row = 21
@@ -649,7 +975,6 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
     _write_section_header(ws, row, "PRESENT VALUE CALCULATION", max_col)
 
     row = 24
-    # Empty slots for historical, then PV of projected
     pv_vals = [None] * len(hist_years) + [None] + dcf["pv_fcfs"] + [dcf["pv_terminal_value"]]
     _write_data_row(ws, row, "PV of Free Cash Flow", pv_vals, fmt=FMT_DOLLAR_B)
 
@@ -668,7 +993,7 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
         ("Terminal Value (undiscounted)", dcf["terminal_value"], FMT_DOLLAR_B),
         ("PV of Terminal Value", dcf["pv_terminal_value"], FMT_DOLLAR_B),
         ("= Enterprise Value", dcf["enterprise_value"], FMT_DOLLAR_B),
-        ("(−) Net Debt", dcf["net_debt"], FMT_DOLLAR_B),
+        ("(-) Net Debt", dcf["net_debt"], FMT_DOLLAR_B),
         ("= Equity Value", dcf["equity_value"], FMT_DOLLAR_B),
         ("Shares Outstanding", dcf["shares_outstanding"], FMT_NUM),
         ("= Implied Share Price", dcf["implied_share_price"], FMT_PRICE),
@@ -698,9 +1023,79 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
         ud_cell.font = RED_FONT
         ud_cell.fill = RED_FILL
 
+    # ===== CHARTS =====
+    combined_years = hist_years + proj_years
+    n_all = len(combined_years)
+    cd = 50
 
-def build_scenario_comparison(wb, model_result, stock):
-    """Sheet 11: Side-by-side comparison of all scenarios."""
+    # -- Chart 1: Revenue Projection (Historical + Projected) --
+    ws.cell(row=cd, column=1, value="Year")
+    ws.cell(row=cd + 1, column=1, value="Historical Revenue ($B)")
+    ws.cell(row=cd + 2, column=1, value="Projected Revenue ($B)")
+    for i, yr in enumerate(hist_years):
+        ws.cell(row=cd, column=2 + i, value=yr)
+        ws.cell(row=cd + 1, column=2 + i, value=hist_rev[i] / 1e9)
+        ws.cell(row=cd + 2, column=2 + i, value=None)  # blank projected for hist
+    for i, yr in enumerate(proj_years):
+        col = 2 + len(hist_years) + i
+        ws.cell(row=cd, column=col, value=yr)
+        ws.cell(row=cd + 1, column=col, value=None)  # blank historical for proj
+        ws.cell(row=cd + 2, column=col, value=proj_rev[i] / 1e9)
+
+    chart1 = BarChart()
+    chart1.type = "col"
+    chart1.style = 10
+    chart1.title = f"Revenue Projection — {scenario.name} ($B)"
+    chart1.y_axis.title = "$ Billions"
+    _style_chart(chart1, 28, 14)
+    cats1 = Reference(ws, min_col=2, max_col=1 + n_all, min_row=cd)
+    d1a = Reference(ws, min_col=2, max_col=1 + n_all, min_row=cd + 1)
+    d1b = Reference(ws, min_col=2, max_col=1 + n_all, min_row=cd + 2)
+    chart1.add_data(d1a, from_rows=True, titles_from_data=False)
+    chart1.add_data(d1b, from_rows=True, titles_from_data=False)
+    chart1.set_categories(cats1)
+    chart1.series[0].tx = SeriesLabel(v="Historical")
+    chart1.series[1].tx = SeriesLabel(v="Projected")
+    chart1.series[0].graphicalProperties.solidFill = MED_BLUE
+    chart1.series[1].graphicalProperties.solidFill = ACCENT_GREEN if scenario_key in ["bull", "rate_cut"] else (ACCENT_RED if scenario_key in ["bear", "rate_hike"] else ACCENT_ORANGE)
+    ws.add_chart(chart1, "D4")
+
+    # -- Chart 2: FCF Projection with PV overlay --
+    ws.cell(row=cd + 4, column=1, value="Year")
+    ws.cell(row=cd + 5, column=1, value="Projected FCF ($B)")
+    ws.cell(row=cd + 6, column=1, value="PV of FCF ($B)")
+    for i, yr in enumerate(proj_years):
+        ws.cell(row=cd + 4, column=2 + i, value=yr)
+        ws.cell(row=cd + 5, column=2 + i, value=proj_fcf[i] / 1e9)
+        ws.cell(row=cd + 6, column=2 + i, value=dcf["pv_fcfs"][i] / 1e9)
+
+    _make_bar_chart(ws, f"FCF vs Present Value — {scenario.name} ($B)", "$ Billions",
+                    [cd + 5, cd + 6], cd + 4, 2, 1 + n_proj,
+                    ["Projected FCF", "PV of FCF"],
+                    "D27", width=28, height=14)
+
+    # -- Chart 3: Valuation Bridge Waterfall --
+    ws.cell(row=cd + 8, column=1, value="Step")
+    ws.cell(row=cd + 9, column=1, value="Value ($B)")
+    bridge_chart_data = [
+        ("PV of FCFs", dcf["pv_fcf_total"] / 1e9),
+        ("PV Terminal", dcf["pv_terminal_value"] / 1e9),
+        ("Enterprise V.", dcf["enterprise_value"] / 1e9),
+        ("(-) Net Debt", -dcf["net_debt"] / 1e9),
+        ("Equity Value", dcf["equity_value"] / 1e9),
+    ]
+    for j, (label, val) in enumerate(bridge_chart_data):
+        ws.cell(row=cd + 8, column=2 + j, value=label)
+        ws.cell(row=cd + 9, column=2 + j, value=val)
+
+    _make_bar_chart(ws, f"Valuation Bridge — {scenario.name} ($B)", "$ Billions",
+                    [cd + 9], cd + 8, 2, 1 + len(bridge_chart_data),
+                    ["Value"],
+                    "A39", width=28, height=14)
+
+
+def build_scenario_comparison(wb, model_result, stock, financials):
+    """Sheet 11: Side-by-side comparison of all scenarios with multiple charts."""
     ws = wb.create_sheet(title="Scenario Comparison")
     ws.sheet_properties.tabColor = "6A1B9A"  # deep purple
     max_col = 7
@@ -708,7 +1103,7 @@ def build_scenario_comparison(wb, model_result, stock):
     _set_col_widths(ws, {1: 30, 2: 16, 3: 16, 4: 16, 5: 16, 6: 16, 7: 16})
 
     row = 1
-    _write_title_row(ws, row, "  SCENARIO COMPARISON — ALL PATHS", max_col)
+    _write_title_row(ws, row, "  SCENARIO COMPARISON  —  ALL PATHS", max_col)
 
     scenario_order = ["bull", "base", "bear", "rate_hike", "rate_cut"]
     names = [model_result["scenarios"][k]["dcf"]["scenario"] for k in scenario_order]
@@ -776,42 +1171,127 @@ def build_scenario_comparison(wb, model_result, stock):
         ws.cell(row=r, column=2, value=note).font = SMALL_FONT
         ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=max_col)
 
-    # Add comparison chart
-    _add_scenario_chart(ws, model_result, scenario_order, start_row=row + len(rate_notes) + 2)
+    # ===== CHARTS =====
+    chart_start = row + len(rate_notes) + 2
+    cd = chart_start + 60  # data area well below charts
+    ns = len(scenario_order)
 
-
-def _add_scenario_chart(ws, model_result, scenario_order, start_row):
-    """Add implied price bar chart across scenarios."""
-    dr = start_row + 16
-    ws.cell(row=dr, column=1, value="Scenario")
-    ws.cell(row=dr + 1, column=1, value="Implied Price")
-    ws.cell(row=dr + 2, column=1, value="Current Price")
-
+    # -- Chart 1: Implied Price vs Current Price --
+    ws.cell(row=cd, column=1, value="Scenario")
+    ws.cell(row=cd + 1, column=1, value="Implied Price ($)")
+    ws.cell(row=cd + 2, column=1, value="Current Price ($)")
     for i, key in enumerate(scenario_order):
         dcf = model_result["scenarios"][key]["dcf"]
-        ws.cell(row=dr, column=2 + i, value=dcf["scenario"])
-        ws.cell(row=dr + 1, column=2 + i, value=dcf["implied_share_price"])
-        ws.cell(row=dr + 2, column=2 + i, value=dcf["current_price"])
+        ws.cell(row=cd, column=2 + i, value=dcf["scenario"])
+        ws.cell(row=cd + 1, column=2 + i, value=dcf["implied_share_price"])
+        ws.cell(row=cd + 2, column=2 + i, value=dcf["current_price"])
 
-    chart = BarChart()
-    chart.type = "col"
-    chart.style = 10
-    chart.title = "Implied Price by Scenario vs Current Price"
-    chart.y_axis.title = "Price ($)"
-    chart.width = 28
-    chart.height = 14
+    _make_bar_chart(ws, "Implied Share Price vs Current Price by Scenario", "Price ($)",
+                    [cd + 1, cd + 2], cd, 2, 1 + ns,
+                    ["Implied Price", "Current Price"],
+                    f"A{chart_start}", width=28, height=14)
 
-    cats = Reference(ws, min_col=2, max_col=1 + len(scenario_order), min_row=dr)
-    d1 = Reference(ws, min_col=2, max_col=1 + len(scenario_order), min_row=dr + 1)
-    d2 = Reference(ws, min_col=2, max_col=1 + len(scenario_order), min_row=dr + 2)
+    # -- Chart 2: Enterprise Value Comparison --
+    ws.cell(row=cd + 4, column=1, value="Scenario")
+    ws.cell(row=cd + 5, column=1, value="PV of FCFs ($B)")
+    ws.cell(row=cd + 6, column=1, value="PV of Terminal Value ($B)")
+    for i, key in enumerate(scenario_order):
+        dcf = model_result["scenarios"][key]["dcf"]
+        ws.cell(row=cd + 4, column=2 + i, value=dcf["scenario"])
+        ws.cell(row=cd + 5, column=2 + i, value=dcf["pv_fcf_total"] / 1e9)
+        ws.cell(row=cd + 6, column=2 + i, value=dcf["pv_terminal_value"] / 1e9)
 
-    chart.add_data(d1, from_rows=True, titles_from_data=False)
-    chart.add_data(d2, from_rows=True, titles_from_data=False)
-    chart.set_categories(cats)
-    chart.series[0].tx = SeriesLabel(v="Implied Price")
-    chart.series[1].tx = SeriesLabel(v="Current Price")
+    chart_ev = BarChart()
+    chart_ev.type = "col"
+    chart_ev.grouping = "stacked"
+    chart_ev.style = 10
+    chart_ev.title = "Enterprise Value Breakdown by Scenario ($B)"
+    chart_ev.y_axis.title = "$ Billions"
+    _style_chart(chart_ev, 28, height=14)
+    cats_ev = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 4)
+    d_pv = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 5)
+    d_tv = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 6)
+    chart_ev.add_data(d_pv, from_rows=True, titles_from_data=False)
+    chart_ev.add_data(d_tv, from_rows=True, titles_from_data=False)
+    chart_ev.set_categories(cats_ev)
+    chart_ev.series[0].tx = SeriesLabel(v="PV of FCFs")
+    chart_ev.series[1].tx = SeriesLabel(v="PV of Terminal Value")
+    chart_ev.series[0].graphicalProperties.solidFill = MED_BLUE
+    chart_ev.series[1].graphicalProperties.solidFill = ACCENT_TEAL
+    ws.add_chart(chart_ev, f"A{chart_start + 15}")
 
-    ws.add_chart(chart, f"A{start_row}")
+    # -- Chart 3: WACC by Scenario --
+    ws.cell(row=cd + 8, column=1, value="Scenario")
+    ws.cell(row=cd + 9, column=1, value="WACC (%)")
+    ws.cell(row=cd + 10, column=1, value="Terminal Growth (%)")
+    for i, key in enumerate(scenario_order):
+        dcf = model_result["scenarios"][key]["dcf"]
+        ws.cell(row=cd + 8, column=2 + i, value=dcf["scenario"])
+        ws.cell(row=cd + 9, column=2 + i, value=dcf["wacc"])
+        ws.cell(row=cd + 10, column=2 + i, value=dcf["terminal_growth"])
+
+    chart_wacc = BarChart()
+    chart_wacc.type = "col"
+    chart_wacc.style = 10
+    chart_wacc.title = "WACC vs Terminal Growth Rate by Scenario"
+    chart_wacc.y_axis.title = "Rate"
+    chart_wacc.y_axis.numFmt = '0.0%'
+    _style_chart(chart_wacc, 28, height=14)
+    cats_w2 = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 8)
+    dw1 = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 9)
+    dw2 = Reference(ws, min_col=2, max_col=1 + ns, min_row=cd + 10)
+    chart_wacc.add_data(dw1, from_rows=True, titles_from_data=False)
+    chart_wacc.add_data(dw2, from_rows=True, titles_from_data=False)
+    chart_wacc.set_categories(cats_w2)
+    chart_wacc.series[0].tx = SeriesLabel(v="WACC")
+    chart_wacc.series[1].tx = SeriesLabel(v="Terminal Growth")
+    chart_wacc.series[0].graphicalProperties.solidFill = ACCENT_RED
+    chart_wacc.series[1].graphicalProperties.solidFill = ACCENT_GREEN
+    ws.add_chart(chart_wacc, f"A{chart_start + 30}")
+
+    # -- Chart 4: FCF Projection Across All Scenarios (Line) --
+    proj_years = [str(int(financials["years"][0]) + i + 1) for i in range(model_result["projection_years"])]
+    n_proj = len(proj_years)
+    ws.cell(row=cd + 12, column=1, value="Year")
+    for j, yr in enumerate(proj_years):
+        ws.cell(row=cd + 12, column=2 + j, value=yr)
+
+    data_rows_fcf = []
+    labels_fcf = []
+    for si, key in enumerate(scenario_order):
+        r = cd + 13 + si
+        scn = model_result["scenarios"][key]
+        ws.cell(row=r, column=1, value=scn["dcf"]["scenario"])
+        for j, fcf_val in enumerate(scn["projection"]["projected_fcf"]):
+            ws.cell(row=r, column=2 + j, value=fcf_val / 1e9)
+        data_rows_fcf.append(r)
+        labels_fcf.append(scn["dcf"]["scenario"])
+
+    chart_fcf_all = _make_line_chart(
+        ws, "Projected FCF Across All Scenarios ($B)", "$ Billions",
+        data_rows_fcf, cd + 12, 2, 1 + n_proj, labels_fcf,
+        f"A{chart_start + 45}", width=28, height=14)
+
+    # -- Chart 5: Revenue Projection Across All Scenarios (Line) --
+    ws.cell(row=cd + 19, column=1, value="Year")
+    for j, yr in enumerate(proj_years):
+        ws.cell(row=cd + 19, column=2 + j, value=yr)
+
+    data_rows_rev = []
+    labels_rev = []
+    for si, key in enumerate(scenario_order):
+        r = cd + 20 + si
+        scn = model_result["scenarios"][key]
+        ws.cell(row=r, column=1, value=scn["dcf"]["scenario"])
+        for j, rev_val in enumerate(scn["projection"]["projected_revenue"]):
+            ws.cell(row=r, column=2 + j, value=rev_val / 1e9)
+        data_rows_rev.append(r)
+        labels_rev.append(scn["dcf"]["scenario"])
+
+    _make_line_chart(
+        ws, "Projected Revenue Across All Scenarios ($B)", "$ Billions",
+        data_rows_rev, cd + 19, 2, 1 + n_proj, labels_rev,
+        f"E{chart_start + 45}", width=28, height=14)
 
 
 def build_sensitivity(wb, model_result, stock, financials):
@@ -825,7 +1305,7 @@ def build_sensitivity(wb, model_result, stock, financials):
         ws.column_dimensions[get_column_letter(i)].width = 14
 
     row = 1
-    _write_title_row(ws, row, "  SENSITIVITY ANALYSIS — IMPLIED SHARE PRICE", max_col)
+    _write_title_row(ws, row, "  SENSITIVITY ANALYSIS  —  IMPLIED SHARE PRICE", max_col)
 
     row = 3
     _write_section_header(ws, row, "WACC vs TERMINAL GROWTH RATE", max_col)
@@ -859,7 +1339,6 @@ def build_sensitivity(wb, model_result, stock, financials):
     # Use the last projected FCF from base case for sensitivity
     last_fcf = model_result["scenarios"]["base"]["projection"]["projected_fcf"][-1]
     n_proj = model_result["projection_years"]
-    pv_fcf_sum = base_dcf["pv_fcf_total"]  # approximate: just recalc terminal
     net_debt = base_dcf["net_debt"]
     shares = stock["shares_outstanding"]
 
@@ -877,12 +1356,10 @@ def build_sensitivity(wb, model_result, stock, financials):
             cell.fill = ALT_ROW_FILL
 
         for j, tg in enumerate(tg_range):
-            # Recalculate with this WACC/TG combination
             if wacc <= tg:
                 val = "N/A"
                 cell = ws.cell(row=r, column=2 + j, value=val)
             else:
-                # Recalculate PV of FCFs with new WACC
                 proj_fcfs = model_result["scenarios"]["base"]["projection"]["projected_fcf"]
                 new_pv_fcfs = sum(fcf / (1 + wacc) ** (k + 1) for k, fcf in enumerate(proj_fcfs))
 
@@ -896,7 +1373,6 @@ def build_sensitivity(wb, model_result, stock, financials):
                 cell = ws.cell(row=r, column=2 + j, value=price)
                 cell.number_format = FMT_PRICE
 
-                # Color based on vs current price
                 if price > stock["current_price"] * 1.1:
                     cell.fill = GREEN_FILL
                     cell.font = GREEN_FONT
@@ -908,10 +1384,8 @@ def build_sensitivity(wb, model_result, stock, financials):
 
             cell.alignment = CENTER
             cell.border = THIN_BORDER
-            if alt and not isinstance(cell.value, str):
-                pass  # keep color fill
 
-        # Highlight the base case row/col
+        # Highlight the base case row
         if abs(wacc - base_wacc) < 0.001:
             for j in range(len(tg_range)):
                 ws.cell(row=r, column=2 + j).border = Border(
@@ -967,7 +1441,6 @@ def build_sensitivity(wb, model_result, stock, financials):
         cell.number_format = FMT_PCT
 
         for j, mg in enumerate(margin_range):
-            # Simplified FCF projection
             proj_fcfs = []
             for yr in range(1, n_proj + 1):
                 fade = 1 - (yr - 1) / (n_proj * 2)
@@ -1001,6 +1474,45 @@ def build_sensitivity(wb, model_result, stock, financials):
                 cell.fill = RED_FILL
                 cell.font = RED_FONT
 
+    # ===== CHARTS for Sensitivity =====
+    sens_chart_row = hr + len(growth_range) + 3
+    scd = sens_chart_row + 32  # data area
+
+    # -- Chart: Impact of WACC on Implied Price (line) --
+    ws.cell(row=scd, column=1, value="WACC")
+    ws.cell(row=scd + 1, column=1, value="Implied Price ($)")
+    mid_tg_idx = len(tg_range) // 2  # use middle terminal growth
+    for i, wacc in enumerate(wacc_range):
+        ws.cell(row=scd, column=2 + i, value=f"{wacc:.1%}")
+        # get the price from the sensitivity table
+        r = 5 + i  # row where the data was written
+        c = 2 + mid_tg_idx
+        cell_val = ws.cell(row=r, column=c).value
+        ws.cell(row=scd + 1, column=2 + i, value=cell_val if isinstance(cell_val, (int, float)) else 0)
+
+    chart_wacc_sens = _make_line_chart(
+        ws, "Impact of WACC on Implied Share Price", "Implied Price ($)",
+        [scd + 1], scd, 2, 1 + len(wacc_range),
+        ["Implied Price at Base Terminal Growth"],
+        f"A{sens_chart_row}", width=28, height=14)
+
+    # -- Chart: Impact of Terminal Growth on Implied Price (line) --
+    ws.cell(row=scd + 3, column=1, value="Terminal Growth")
+    ws.cell(row=scd + 4, column=1, value="Implied Price ($)")
+    mid_wacc_idx = len(wacc_range) // 2  # use middle WACC (base)
+    for j, tg in enumerate(tg_range):
+        ws.cell(row=scd + 3, column=2 + j, value=f"{tg:.2%}")
+        r = 5 + mid_wacc_idx
+        c = 2 + j
+        cell_val = ws.cell(row=r, column=c).value
+        ws.cell(row=scd + 4, column=2 + j, value=cell_val if isinstance(cell_val, (int, float)) else 0)
+
+    _make_line_chart(
+        ws, "Impact of Terminal Growth on Implied Share Price", "Implied Price ($)",
+        [scd + 4], scd + 3, 2, 1 + len(tg_range),
+        ["Implied Price at Base WACC"],
+        f"A{sens_chart_row + 15}", width=28, height=14)
+
 
 # ============================================================================
 # MAIN BUILDER
@@ -1026,7 +1538,7 @@ def build_workbook(stock, financials, rates, model_result, data_source) -> Workb
         build_dcf_scenario_sheet(wb, key, model_result, financials, stock)
 
     # Sheet 11: Scenario Comparison
-    build_scenario_comparison(wb, model_result, stock)
+    build_scenario_comparison(wb, model_result, stock, financials)
 
     # Sheet 12: Sensitivity Analysis
     build_sensitivity(wb, model_result, stock, financials)
