@@ -381,12 +381,49 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
         r = row + 1 + i
         _write_data_row(ws, r, label, vals, fmt=FMT_DOLLAR_B, alt=i % 2 == 1)
 
-    # --- Instruction note ---
+    # --- Interest Rate Path Summary ---
     row = 31
-    ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=max_col)
+    _write_section_header(ws, row, "INTEREST RATE PATH (Year-by-Year WACC Trajectory)", max_col)
+
+    row = 32
+    n_proj = model_result["projection_years"]
+    base_year = int(financials["years"][0])
+    proj_year_labels = [str(base_year + i + 1) for i in range(n_proj)]
+    rate_headers = ["Scenario"] + proj_year_labels + ["Terminal WACC"] + [""] * (max_col - 2 - n_proj)
+    _write_header_row(ws, row, rate_headers[:max_col])
+
+    for i, key in enumerate(scenario_order):
+        r = row + 1 + i
+        dcf = model_result["scenarios"][key]["dcf"]
+        yearly = dcf.get("yearly_waccs", [dcf["wacc"]] * n_proj)
+        terminal = dcf.get("terminal_wacc", dcf["wacc"])
+        rate_bp = dcf.get("rate_path_bp", [0] * n_proj)
+
+        cell = ws.cell(row=r, column=1, value=dcf["scenario"])
+        cell.font = LABEL_FONT
+        cell.border = THIN_BORDER
+
+        for j in range(min(n_proj, len(yearly))):
+            cell = ws.cell(row=r, column=2 + j, value=yearly[j])
+            cell.font = VALUE_FONT
+            cell.alignment = RIGHT
+            cell.border = THIN_BORDER
+            cell.number_format = FMT_PCT2
+
+        cell = ws.cell(row=r, column=2 + n_proj, value=terminal)
+        cell.font = BOLD_VALUE
+        cell.alignment = RIGHT
+        cell.border = THIN_BORDER
+        cell.number_format = FMT_PCT2
+
+    # --- Instruction note ---
+    row = 39
+    ws.merge_cells(start_row=row, start_column=1, end_row=row + 2, end_column=max_col)
     note = ws.cell(row=row, column=1,
-                   value="HOW TO USE: Run  python generate_dcf.py <TICKER>  to regenerate this workbook for any stock. "
-                         "Example: python generate_dcf.py MSFT. Requires yfinance and openpyxl (pip install -r requirements.txt).")
+                   value="HOW TO USE: Run  python generate_dcf.py <TICKER>  to regenerate this workbook for any stock.\n"
+                         "Examples:  python generate_dcf.py MSFT  |  python generate_dcf.py TSLA  |  python generate_dcf.py GOOGL\n"
+                         "For Alpha Vantage:  python generate_dcf.py AAPL --av-key YOUR_KEY  |  "
+                         "For FRED rates:  python generate_dcf.py AAPL --fred-key YOUR_KEY")
     note.font = Font(name="Calibri", size=10, italic=True, color="666666")
     note.alignment = WRAP
 
@@ -410,7 +447,7 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
     _make_bar_chart(ws, "Revenue vs FCF vs Net Income ($B)", "$ Billions",
                     [cd + 1, cd + 2, cd + 3], cd, 2, 1 + n_years,
                     ["Revenue", "Free Cash Flow", "Net Income"],
-                    "A33", width=28, height=14)
+                    "A43", width=28, height=14)
 
     # -- Chart 2: Profitability margins line chart --
     ws.cell(row=cd + 5, column=1, value="Year")
@@ -429,7 +466,7 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
     chart2 = _make_line_chart(ws, "Profitability Margins Over Time", "Margin %",
                               [cd + 6, cd + 7, cd + 8, cd + 9], cd + 5, 2, 1 + n_years,
                               ["Gross Margin", "Operating Margin", "Net Margin", "FCF Margin"],
-                              "F33", width=24, height=14)
+                              "F43", width=24, height=14)
     chart2.y_axis.numFmt = '0%'
 
     # -- Chart 3: Scenario implied price bar chart --
@@ -445,7 +482,7 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
     _make_bar_chart(ws, "Implied Share Price by Scenario", "Price ($)",
                     [cd + 12, cd + 13], cd + 11, 2, 1 + len(scenario_order),
                     ["Implied Price", "Current Price"],
-                    "A49", width=28, height=14)
+                    "A59", width=28, height=14)
 
     # -- Chart 4: WACC components stacked view --
     ws.cell(row=cd + 15, column=1, value="Scenario")
@@ -460,7 +497,7 @@ def build_dashboard(wb, stock, financials, rates, model_result, data_source):
     chart4 = _make_bar_chart(ws, "WACC vs Terminal Growth by Scenario", "Rate",
                              [cd + 16, cd + 17], cd + 15, 2, 1 + len(scenario_order),
                              ["WACC", "Terminal Growth"],
-                             "F49", width=24, height=14)
+                             "F59", width=24, height=14)
     chart4.y_axis.numFmt = '0.0%'
 
 
@@ -895,74 +932,115 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
     adj_items = [
         ("Revenue Growth Adjustment", scenario.revenue_growth_adj, FMT_PCT),
         ("Operating Margin Adjustment", scenario.margin_adj, FMT_PCT),
-        ("WACC Adjustment", scenario.wacc_adj, FMT_PCT),
+        ("Total WACC Adjustment (over projection)", scenario.wacc_adj, FMT_PCT),
         ("Terminal Growth Adjustment", scenario.terminal_growth_adj, FMT_PCT),
-        ("Scenario WACC", dcf["wacc"], FMT_PCT2),
+        ("Average Scenario WACC", dcf["wacc"], FMT_PCT2),
+        ("Terminal WACC", dcf.get("terminal_wacc", dcf["wacc"]), FMT_PCT2),
         ("Terminal Growth Rate", dcf["terminal_growth"], FMT_PCT2),
     ]
     for i, (label, val, fmt) in enumerate(adj_items):
         r = row + 1 + i
         _write_kv(ws, r, 1, label, 2, val, fmt)
 
+    # Interest Rate Path
+    row = 13
+    _write_section_header(ws, row, "INTEREST RATE PATH (Year-by-Year WACC)", max_col)
+    row = 14
+    rate_path_bp = dcf.get("rate_path_bp", [0] * n_proj)
+    yearly_waccs = dcf.get("yearly_waccs", [dcf["wacc"]] * n_proj)
+    rate_hdr = [""] + proj_years + ["Terminal"] + [""] * (max_col - 2 - n_proj)
+    _write_header_row(ws, row, rate_hdr[:max_col])
+
+    row = 15
+    _write_data_row(ws, row, "Rate Change (bp/yr)",
+                    [None] * len(hist_years) + [None] + rate_path_bp + [0],
+                    fmt='0', start_col=1)
+    # Replace: only write the projection columns for rate path
+    cell = ws.cell(row=row, column=1, value="Rate Change (bp/yr)")
+    cell.font = LABEL_FONT
+    cell.border = THIN_BORDER
+    for j, bp in enumerate(rate_path_bp[:n_proj]):
+        c = ws.cell(row=row, column=2 + j, value=bp)
+        c.font = VALUE_FONT
+        c.alignment = RIGHT
+        c.border = THIN_BORDER
+        c.number_format = '+0;-0;0'
+
+    row = 16
+    cell = ws.cell(row=row, column=1, value="WACC (%)")
+    cell.font = BOLD_VALUE
+    cell.border = THIN_BORDER
+    for j, w in enumerate(yearly_waccs[:n_proj]):
+        c = ws.cell(row=row, column=2 + j, value=w)
+        c.font = BOLD_VALUE
+        c.alignment = RIGHT
+        c.border = THIN_BORDER
+        c.number_format = FMT_PCT2
+    c = ws.cell(row=row, column=2 + n_proj, value=dcf.get("terminal_wacc", dcf["wacc"]))
+    c.font = BOLD_VALUE
+    c.alignment = RIGHT
+    c.border = THIN_BORDER
+    c.number_format = FMT_PCT2
+
     # Historical + Projected FCF
-    row = 12
+    row = 18
     _write_section_header(ws, row, "HISTORICAL  <-->  PROJECTED", max_col)
 
-    row = 13
+    row = 19
     header_labels = [""] + hist_years + ["->"] + proj_years + ["Terminal"]
     _write_header_row(ws, row, header_labels)
 
     # Revenue
-    row = 14
+    row = 20
     hist_rev = financials["revenue"]
     proj_rev = proj["projected_revenue"]
     term_rev = proj_rev[-1] * (1 + dcf["terminal_growth"])
     _write_data_row(ws, row, "Revenue", hist_rev + [None] + proj_rev + [term_rev], fmt=FMT_DOLLAR_B)
 
     # Growth Rate
-    row = 15
+    row = 21
     hist_growths = model_result["metrics"]["revenue_growths"]
     proj_growths = proj["growth_rates"]
     growth_vals = hist_growths + [None] * (len(hist_years) - len(hist_growths)) + [None] + proj_growths + [dcf["terminal_growth"]]
     _write_data_row(ws, row, "Revenue Growth %", growth_vals, fmt=FMT_PCT, alt=True)
 
     # Operating Income / EBIT
-    row = 16
+    row = 22
     hist_ebit = financials["operating_income"]
     proj_ebit = proj["projected_ebit"]
     term_ebit = proj_ebit[-1] * (1 + dcf["terminal_growth"])
     _write_data_row(ws, row, "EBIT (Operating Income)", hist_ebit + [None] + proj_ebit + [term_ebit], fmt=FMT_DOLLAR_B)
 
     # Operating Margin
-    row = 17
+    row = 23
     hist_margins = model_result["metrics"]["operating_margins"]
     proj_margins = proj["margins"]
     margin_vals = hist_margins + [None] * (len(hist_years) - len(hist_margins)) + [None] + proj_margins + [proj_margins[-1]]
     _write_data_row(ws, row, "Operating Margin %", margin_vals, fmt=FMT_PCT, alt=True)
 
     # NOPAT
-    row = 18
+    row = 24
     hist_nopat = [financials["operating_income"][i] * (1 - proj["tax_rate"]) for i in range(len(hist_years))]
     proj_nopat = proj["projected_nopat"]
     term_nopat = proj_nopat[-1] * (1 + dcf["terminal_growth"])
     _write_data_row(ws, row, "NOPAT (EBIT x (1-T))", hist_nopat + [None] + proj_nopat + [term_nopat], fmt=FMT_DOLLAR_B)
 
     # D&A
-    row = 19
+    row = 25
     hist_da = financials["depreciation"]
     proj_da = proj["projected_da"]
     term_da = proj_da[-1] * (1 + dcf["terminal_growth"])
     _write_data_row(ws, row, "(+) Depreciation & Amort.", hist_da + [None] + proj_da + [term_da], fmt=FMT_DOLLAR_B, alt=True)
 
     # CapEx
-    row = 20
+    row = 26
     hist_capex = [abs(c) for c in financials["capex"]]
     proj_capex = proj["projected_capex"]
     term_capex = proj_capex[-1] * (1 + dcf["terminal_growth"])
     _write_data_row(ws, row, "(-) Capital Expenditure", hist_capex + [None] + proj_capex + [term_capex], fmt=FMT_DOLLAR_B)
 
     # FCF
-    row = 21
+    row = 27
     hist_fcf = financials["free_cash_flow"]
     proj_fcf = proj["projected_fcf"]
     term_fcf = proj_fcf[-1] * (1 + dcf["terminal_growth"])
@@ -971,21 +1049,29 @@ def build_dcf_scenario_sheet(wb, scenario_key, model_result, financials, stock):
                     fmt=FMT_DOLLAR_B, label_font=BOLD_VALUE, value_font=BOLD_VALUE, alt=True)
 
     # PV of FCFs
-    row = 23
+    row = 29
     _write_section_header(ws, row, "PRESENT VALUE CALCULATION", max_col)
 
-    row = 24
+    row = 30
     pv_vals = [None] * len(hist_years) + [None] + dcf["pv_fcfs"] + [dcf["pv_terminal_value"]]
     _write_data_row(ws, row, "PV of Free Cash Flow", pv_vals, fmt=FMT_DOLLAR_B)
 
-    row = 25
-    disc_factors = [None] * len(hist_years) + [None] + \
-                   [1 / (1 + dcf["wacc"]) ** (i + 1) for i in range(n_proj)] + \
-                   [1 / (1 + dcf["wacc"]) ** n_proj]
+    row = 31
+    yearly_waccs = dcf.get("yearly_waccs", [dcf["wacc"]] * n_proj)
+    cum_disc = 1.0
+    disc_factors = [None] * len(hist_years) + [None]
+    for i in range(n_proj):
+        cum_disc *= (1 + yearly_waccs[i])
+        disc_factors.append(1.0 / cum_disc)
+    disc_factors.append(1.0 / cum_disc)
     _write_data_row(ws, row, "Discount Factor", disc_factors, fmt="0.0000", alt=True)
 
+    row = 32
+    wacc_row_vals = [None] * len(hist_years) + [None] + yearly_waccs[:n_proj] + [dcf.get("terminal_wacc", dcf["wacc"])]
+    _write_data_row(ws, row, "WACC (Year-by-Year)", wacc_row_vals, fmt=FMT_PCT2)
+
     # Valuation Bridge
-    row = 27
+    row = 34
     _write_section_header(ws, row, "VALUATION BRIDGE", max_col)
 
     bridge_items = [
@@ -1518,6 +1604,138 @@ def build_sensitivity(wb, model_result, stock, financials):
 # MAIN BUILDER
 # ============================================================================
 
+def build_instructions_sheet(wb, stock):
+    """Sheet 13: How to use this workbook and change tickers."""
+    ws = wb.create_sheet(title="Instructions")
+    ws.sheet_properties.tabColor = "37474F"
+    max_col = 8
+
+    _set_col_widths(ws, {1: 4, 2: 35, 3: 60, 4: 5, 5: 35, 6: 40, 7: 5, 8: 5})
+
+    row = 1
+    _write_title_row(ws, row, "  HOW TO USE THIS DCF MODEL", max_col)
+
+    row = 3
+    _write_section_header(ws, row, "CHANGE THE TICKER — ANALYZE ANY STOCK", max_col)
+
+    instructions = [
+        ("Step 1", "Open a terminal / command prompt"),
+        ("Step 2", "Navigate to the project folder:\n  cd DCF_Excel-Sheet"),
+        ("Step 3", "Run for any stock ticker:\n  python generate_dcf.py MSFT"),
+        ("Step 4", "Open the generated Excel file:\n  MSFT_DCF_Model.xlsx"),
+        ("", ""),
+        ("Example Tickers", "AAPL, MSFT, GOOGL, TSLA, AMZN, META, NVDA, JPM, JNJ, WMT"),
+    ]
+    for i, (step, desc) in enumerate(instructions):
+        r = row + 1 + i
+        ws.cell(row=r, column=2, value=step).font = BOLD_VALUE
+        ws.cell(row=r, column=3, value=desc).font = LABEL_FONT
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=max_col)
+
+    row = 11
+    _write_section_header(ws, row, "FREE API DATA SOURCES", max_col)
+
+    apis = [
+        ("Yahoo Finance (yfinance)", "No API key needed", "Stock price, financials, balance sheet, cash flow",
+         "pip install yfinance"),
+        ("Alpha Vantage", "Free key at alphavantage.co", "Fallback: stock data, income stmt, balance sheet, cash flow",
+         "python generate_dcf.py AAPL --av-key YOUR_KEY"),
+        ("FRED (Federal Reserve)", "Free key at fred.stlouisfed.org", "10-Year Treasury, 2-Year Treasury, Fed Funds Rate",
+         "python generate_dcf.py AAPL --fred-key YOUR_KEY"),
+        ("Yahoo Finance (^TNX/^IRX)", "No API key needed", "Fallback: Treasury yields from market data", "Automatic"),
+    ]
+    r = row + 1
+    _write_header_row(ws, r, ["", "API Source", "API Key", "Data Provided", "Command", "", "", ""])
+    for i, (source, key_info, data, cmd) in enumerate(apis):
+        r = row + 2 + i
+        ws.cell(row=r, column=2, value=source).font = BOLD_VALUE
+        ws.cell(row=r, column=3, value=key_info).font = LABEL_FONT
+        ws.cell(row=r, column=4, value=data).font = LABEL_FONT
+        ws.merge_cells(start_row=r, start_column=4, end_row=r, end_column=5)
+        ws.cell(row=r, column=6, value=cmd).font = Font(name="Consolas", size=9, color=MED_BLUE)
+        ws.merge_cells(start_row=r, start_column=6, end_row=r, end_column=max_col)
+        for c in range(2, max_col + 1):
+            ws.cell(row=r, column=c).border = THIN_BORDER
+
+    row = 18
+    _write_section_header(ws, row, "SCENARIO DESCRIPTIONS", max_col)
+
+    scenarios = [
+        ("Base Case", "Moderate growth rates based on historical averages. Current interest rates maintained. "
+         "WACC stays flat throughout the projection period."),
+        ("Bull Case", "Revenue growth accelerates (+3%), operating margins expand (+2%), interest rates fall "
+         "(-100bp over 5 years). Represents a strong economic environment with Fed easing."),
+        ("Bear Case", "Revenue growth declines (-3%), margins compress (-2%), rates rise (+150bp over 5 years). "
+         "Represents recession / tightening cycle with declining profitability."),
+        ("Rising Rates", "Revenue stays at base growth, but the Fed aggressively hikes rates (+200bp). "
+         "Higher WACC reduces present value of all future cash flows. Slight margin pressure."),
+        ("Falling Rates", "Revenue stays at base growth, but the Fed cuts rates (-150bp). "
+         "Lower WACC increases present value of future cash flows. Slight margin benefit."),
+    ]
+    for i, (name, desc) in enumerate(scenarios):
+        r = row + 1 + i
+        ws.cell(row=r, column=2, value=name).font = BOLD_VALUE
+        ws.cell(row=r, column=3, value=desc).font = LABEL_FONT
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=max_col)
+        ws.cell(row=r, column=3).alignment = WRAP
+        ws.row_dimensions[r].height = 36
+
+    row = 25
+    _write_section_header(ws, row, "WORKBOOK SHEETS GUIDE", max_col)
+
+    sheets = [
+        ("Dashboard", "Company overview, key metrics, scenario summary, historical charts"),
+        ("Income Statement", "Historical revenue, COGS, gross profit, EBIT, net income + margin charts"),
+        ("Balance Sheet", "Historical assets, liabilities, equity, debt + ratio charts"),
+        ("Cash Flow", "Operating cash flow, CapEx, D&A, free cash flow + conversion charts"),
+        ("WACC", "Weighted Average Cost of Capital breakdown, CAPM, capital structure pie chart"),
+        ("DCF Base/Bull/Bear/Rates", "5 detailed DCF scenario sheets with year-by-year rate paths"),
+        ("Scenario Comparison", "Side-by-side comparison of all 5 scenarios with multi-chart analysis"),
+        ("Sensitivity Analysis", "WACC vs Terminal Growth matrix + Revenue Growth vs Margin matrix"),
+    ]
+    for i, (sheet, desc) in enumerate(sheets):
+        r = row + 1 + i
+        ws.cell(row=r, column=2, value=sheet).font = BOLD_VALUE
+        ws.cell(row=r, column=3, value=desc).font = LABEL_FONT
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=max_col)
+
+    row = 35
+    _write_section_header(ws, row, "COMMAND LINE OPTIONS", max_col)
+
+    cmds = [
+        ("python generate_dcf.py AAPL", "Generate DCF for Apple"),
+        ("python generate_dcf.py MSFT -o my_file.xlsx", "Custom output filename"),
+        ("python generate_dcf.py TSLA --projection-years 7", "7-year projection (default: 5)"),
+        ("python generate_dcf.py AAPL --terminal-growth 0.03", "3% terminal growth (default: 2.5%)"),
+        ("python generate_dcf.py AAPL --erp 0.06", "6% equity risk premium (default: 5.5%)"),
+        ("python generate_dcf.py AAPL --av-key KEY", "Use Alpha Vantage as data fallback"),
+        ("python generate_dcf.py AAPL --fred-key KEY", "Use FRED for interest rate data"),
+        ("python generate_dcf.py AAPL --sample", "Use built-in sample data (offline mode)"),
+    ]
+    r = row + 1
+    _write_header_row(ws, r, ["", "Command", "Description", "", "", "", "", ""])
+    for i, (cmd, desc) in enumerate(cmds):
+        r = row + 2 + i
+        ws.cell(row=r, column=2, value=cmd).font = Font(name="Consolas", size=9, color=MED_BLUE)
+        ws.cell(row=r, column=3, value=desc).font = LABEL_FONT
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=max_col)
+        for c in range(2, max_col + 1):
+            ws.cell(row=r, column=c).border = THIN_BORDER
+
+    row = 46
+    _write_section_header(ws, row, "REQUIREMENTS", max_col)
+    r = row + 1
+    ws.cell(row=r, column=2, value="Install:").font = BOLD_VALUE
+    ws.cell(row=r, column=3, value="pip install -r requirements.txt").font = Font(name="Consolas", size=10, color=MED_BLUE)
+    r = row + 2
+    ws.cell(row=r, column=2, value="Packages:").font = BOLD_VALUE
+    ws.cell(row=r, column=3, value="yfinance, openpyxl, requests, pandas").font = LABEL_FONT
+
+    r = row + 4
+    ws.cell(row=r, column=2, value=f"Current Ticker:").font = BOLD_VALUE
+    ws.cell(row=r, column=3, value=stock["ticker"]).font = BIG_NUMBER
+
+
 def build_workbook(stock, financials, rates, model_result, data_source) -> Workbook:
     """Build the complete DCF workbook and return the Workbook object."""
     wb = Workbook()
@@ -1542,6 +1760,9 @@ def build_workbook(stock, financials, rates, model_result, data_source) -> Workb
 
     # Sheet 12: Sensitivity Analysis
     build_sensitivity(wb, model_result, stock, financials)
+
+    # Sheet 13: Instructions
+    build_instructions_sheet(wb, stock)
 
     return wb
 

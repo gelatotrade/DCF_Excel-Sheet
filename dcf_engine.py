@@ -4,14 +4,18 @@ dcf_engine.py
 Core DCF valuation calculations with multi-scenario analysis.
 
 Scenarios modeled:
-  1. Base Case         – moderate growth, current rates
-  2. Bull Case         – rising sales & profit, falling rates
-  3. Bear Case         – falling sales & profit, rising rates
-  4. Rate Hike Case    – stable sales, rising rates
-  5. Rate Cut Case     – stable sales, falling rates
+  1. Base Case         – moderate growth, current rates maintained
+  2. Bull Case         – rising sales & profit, falling rates (easing cycle)
+  3. Bear Case         – falling sales & profit, rising rates (tightening cycle)
+  4. Rate Hike Case    – stable sales, aggressive rate hikes (+200bp over 5 years)
+  5. Rate Cut Case     – stable sales, rate cuts (-150bp over 5 years)
+
+Each scenario models year-by-year interest rate trajectories so the WACC
+changes dynamically rather than using a single static adjustment.
 """
 
 from dataclasses import dataclass, field
+from typing import List
 
 
 # ============================================================================
@@ -23,13 +27,19 @@ class Scenario:
     name: str
     description: str
     # Revenue growth rate adjustments (annual)
-    revenue_growth_adj: float        # added to base growth (e.g. +0.02 = 2% higher growth)
+    revenue_growth_adj: float
     # Operating margin adjustment
-    margin_adj: float                # added to base margin (e.g. +0.01 = 1% wider)
-    # WACC / discount rate adjustment
-    wacc_adj: float                  # added to computed WACC (e.g. +0.01 = 100bp higher)
+    margin_adj: float
+    # WACC / discount rate adjustment (total, spread across projection)
+    wacc_adj: float
     # Terminal growth rate adjustment
-    terminal_growth_adj: float       # added to terminal growth
+    terminal_growth_adj: float
+    # Year-by-year rate trajectory (bp change per year, e.g. [+50, +50, +25, +25, +25])
+    rate_path_bp: list = field(default_factory=list)
+    # Revenue growth trajectory modifiers per year (multiplicative)
+    growth_trajectory: list = field(default_factory=list)
+    # Margin trajectory modifiers per year (additive, applied on top of margin_adj)
+    margin_trajectory: list = field(default_factory=list)
 
 
 SCENARIOS = {
@@ -40,38 +50,53 @@ SCENARIOS = {
         margin_adj=0.0,
         wacc_adj=0.0,
         terminal_growth_adj=0.0,
+        rate_path_bp=[0, 0, 0, 0, 0],
+        growth_trajectory=[1.0, 0.95, 0.90, 0.85, 0.80],
+        margin_trajectory=[0.0, 0.0, 0.0, 0.0, 0.0],
     ),
     "bull": Scenario(
         name="Bull Case",
-        description="Rising sales & profit, falling interest rates (-100bp)",
-        revenue_growth_adj=0.03,       # +3% revenue growth
-        margin_adj=0.02,               # +2% margin expansion
-        wacc_adj=-0.01,                # -100bp discount rate (lower rates)
-        terminal_growth_adj=0.005,     # +50bp terminal growth
+        description="Rising sales & profit margins, falling interest rates (-100bp easing cycle)",
+        revenue_growth_adj=0.03,
+        margin_adj=0.02,
+        wacc_adj=-0.01,
+        terminal_growth_adj=0.005,
+        rate_path_bp=[-25, -25, -25, -15, -10],
+        growth_trajectory=[1.10, 1.08, 1.05, 1.02, 1.00],
+        margin_trajectory=[0.005, 0.005, 0.004, 0.003, 0.003],
     ),
     "bear": Scenario(
         name="Bear Case",
-        description="Falling sales & profit, rising interest rates (+150bp)",
-        revenue_growth_adj=-0.03,      # -3% revenue growth
-        margin_adj=-0.02,              # -2% margin compression
-        wacc_adj=0.015,                # +150bp discount rate (higher rates)
-        terminal_growth_adj=-0.005,    # -50bp terminal growth
+        description="Falling sales & profit margins, rising interest rates (+150bp tightening)",
+        revenue_growth_adj=-0.03,
+        margin_adj=-0.02,
+        wacc_adj=0.015,
+        terminal_growth_adj=-0.005,
+        rate_path_bp=[+50, +40, +30, +20, +10],
+        growth_trajectory=[0.90, 0.85, 0.82, 0.80, 0.80],
+        margin_trajectory=[-0.005, -0.005, -0.004, -0.003, -0.003],
     ),
     "rate_hike": Scenario(
         name="Rising Rates",
-        description="Stable sales, aggressive rate hikes (+200bp)",
+        description="Stable sales, aggressive rate hikes (+200bp): Fed fights inflation",
         revenue_growth_adj=0.0,
-        margin_adj=-0.005,             # slight margin pressure from higher costs
-        wacc_adj=0.02,                 # +200bp
+        margin_adj=-0.005,
+        wacc_adj=0.02,
         terminal_growth_adj=0.0,
+        rate_path_bp=[+75, +50, +50, +25, 0],
+        growth_trajectory=[1.0, 0.98, 0.95, 0.93, 0.90],
+        margin_trajectory=[0.0, -0.003, -0.005, -0.003, 0.0],
     ),
     "rate_cut": Scenario(
         name="Falling Rates",
-        description="Stable sales, rate cuts (-150bp)",
+        description="Stable sales, rate cuts (-150bp): Fed easing to support growth",
         revenue_growth_adj=0.0,
-        margin_adj=0.005,              # slight margin benefit
-        wacc_adj=-0.015,               # -150bp
+        margin_adj=0.005,
+        wacc_adj=-0.015,
         terminal_growth_adj=0.0,
+        rate_path_bp=[-50, -50, -25, -15, -10],
+        growth_trajectory=[1.0, 1.02, 1.03, 1.02, 1.00],
+        margin_trajectory=[0.0, 0.002, 0.003, 0.002, 0.0],
     ),
 }
 
@@ -190,27 +215,36 @@ def project_fcf(financials: dict, metrics: dict, scenario: Scenario,
     """
     Project Free Cash Flow for the next N years under a given scenario.
 
+    Uses year-by-year growth and margin trajectories from the scenario
+    definition for more realistic modeling of how economic conditions
+    evolve over time (e.g., gradual rate hikes, margin expansion).
+
     Approach:
-      1. Project revenue using historical growth + scenario adjustment
-      2. Apply operating margin (historical avg + scenario adjustment) to get EBIT
+      1. Project revenue using historical growth + scenario trajectory
+      2. Apply operating margin (with year-by-year adjustments) to get EBIT
       3. Compute NOPAT = EBIT * (1 - tax_rate)
-      4. Add back D&A, subtract CapEx, subtract change in working capital
+      4. Add back D&A, subtract CapEx
       5. Result = Unlevered Free Cash Flow
     """
-    base_rev = financials["revenue"][0]  # most recent year
+    base_rev = financials["revenue"][0]
     base_growth = metrics["avg_revenue_growth"]
     base_op_margin = metrics["avg_operating_margin"]
     base_capex_pct = metrics["avg_capex_pct"]
     base_da_pct = metrics["avg_da_pct"]
 
-    # Tax rate from most recent year
     tax_prov = abs(financials["tax_provision"][0]) if financials["tax_provision"][0] else 0
     pretax = abs(financials["net_income"][0]) + tax_prov
     tax_rate = tax_prov / pretax if pretax > 0 else 0.21
 
-    # Adjusted rates for this scenario
-    adj_growth = max(base_growth + scenario.revenue_growth_adj, -0.15)  # floor at -15%
-    adj_margin = max(base_op_margin + scenario.margin_adj, 0.01)       # floor at 1%
+    adj_growth = max(base_growth + scenario.revenue_growth_adj, -0.15)
+    adj_margin = max(base_op_margin + scenario.margin_adj, 0.01)
+
+    growth_traj = scenario.growth_trajectory or [1.0] * projection_years
+    margin_traj = scenario.margin_trajectory or [0.0] * projection_years
+    while len(growth_traj) < projection_years:
+        growth_traj.append(growth_traj[-1] if growth_traj else 1.0)
+    while len(margin_traj) < projection_years:
+        margin_traj.append(margin_traj[-1] if margin_traj else 0.0)
 
     projected_revenue = []
     projected_ebit = []
@@ -221,27 +255,30 @@ def project_fcf(financials: dict, metrics: dict, scenario: Scenario,
     growth_rates = []
     margins = []
 
-    for yr in range(1, projection_years + 1):
-        # Growth fades toward terminal rate over time
-        fade_factor = 1 - (yr - 1) / (projection_years * 2)  # gradual fade
-        growth = adj_growth * fade_factor
-        growth = max(growth, 0.005) if adj_growth > 0 else growth  # floor positive growth
+    cumulative_rev = base_rev
+    for yr in range(projection_years):
+        growth = adj_growth * growth_traj[yr]
+        growth = max(growth, -0.15)
+        if adj_growth > 0:
+            growth = max(growth, 0.005)
 
-        rev = base_rev * (1 + growth) ** yr
-        ebit = rev * adj_margin
+        year_margin = max(adj_margin + margin_traj[yr], 0.01)
+
+        cumulative_rev = cumulative_rev * (1 + growth)
+        ebit = cumulative_rev * year_margin
         nopat = ebit * (1 - tax_rate)
-        da = rev * base_da_pct
-        capex = rev * base_capex_pct
+        da = cumulative_rev * base_da_pct
+        capex = cumulative_rev * base_capex_pct
         fcf = nopat + da - capex
 
-        projected_revenue.append(rev)
+        projected_revenue.append(cumulative_rev)
         projected_ebit.append(ebit)
         projected_nopat.append(nopat)
         projected_da.append(da)
         projected_capex.append(capex)
         projected_fcf.append(fcf)
         growth_rates.append(growth)
-        margins.append(adj_margin)
+        margins.append(year_margin)
 
     return {
         "scenario": scenario.name,
@@ -268,50 +305,70 @@ def compute_dcf(projection: dict, wacc_data: dict, scenario: Scenario,
     """
     Compute enterprise value via DCF, then derive equity value per share.
 
-    Terminal Value = FCF_n * (1 + g) / (WACC - g)   [Gordon Growth Model]
-    """
-    wacc = wacc_data["wacc"] + scenario.wacc_adj
-    wacc = max(wacc, 0.04)  # floor at 4%
+    Uses year-by-year WACC adjustments from the scenario's rate_path_bp
+    to model how changing interest rates affect the discount rate over time.
 
-    tg = terminal_growth + scenario.terminal_growth_adj
-    tg = min(tg, wacc - 0.01)  # terminal growth must be < WACC
-    tg = max(tg, 0.005)        # floor at 0.5%
+    Terminal Value = FCF_n * (1 + g) / (WACC_terminal - g)   [Gordon Growth Model]
+    """
+    base_wacc = wacc_data["wacc"]
+    rate_path = scenario.rate_path_bp or [0] * len(projection["projected_fcf"])
+    while len(rate_path) < len(projection["projected_fcf"]):
+        rate_path.append(rate_path[-1] if rate_path else 0)
 
     fcfs = projection["projected_fcf"]
     n = len(fcfs)
 
-    # Present value of projected FCFs
+    # Year-by-year WACC with cumulative rate path
+    yearly_waccs = []
+    cumulative_bp = 0
+    for i in range(n):
+        cumulative_bp += rate_path[i]
+        yr_wacc = max(base_wacc + cumulative_bp / 10000.0, 0.04)
+        yearly_waccs.append(yr_wacc)
+
+    # Terminal WACC = base + total adjustment
+    terminal_wacc = max(base_wacc + scenario.wacc_adj, 0.04)
+
+    # Average WACC for summary display
+    avg_wacc = sum(yearly_waccs) / len(yearly_waccs) if yearly_waccs else terminal_wacc
+
+    tg = terminal_growth + scenario.terminal_growth_adj
+    tg = min(tg, terminal_wacc - 0.01)
+    tg = max(tg, 0.005)
+
+    # Present value of projected FCFs using cumulative discount
     pv_fcfs = []
+    cumulative_discount = 1.0
     for i, fcf in enumerate(fcfs):
-        pv = fcf / (1 + wacc) ** (i + 1)
+        cumulative_discount *= (1 + yearly_waccs[i])
+        pv = fcf / cumulative_discount
         pv_fcfs.append(pv)
 
     pv_fcf_total = sum(pv_fcfs)
 
-    # Terminal value
+    # Terminal value (discounted at terminal WACC)
     terminal_fcf = fcfs[-1] * (1 + tg)
-    terminal_value = terminal_fcf / (wacc - tg)
-    pv_terminal = terminal_value / (1 + wacc) ** n
+    terminal_value = terminal_fcf / (terminal_wacc - tg)
+    pv_terminal = terminal_value / cumulative_discount
 
-    # Enterprise value
     enterprise_value = pv_fcf_total + pv_terminal
 
-    # Equity value
     net_debt = financials["total_debt"][0] - financials["cash"][0]
     equity_value = enterprise_value - net_debt
 
-    # Per share
     shares = stock["shares_outstanding"]
     value_per_share = equity_value / shares if shares > 0 else 0
 
-    # Upside / downside
     current_price = stock["current_price"]
     upside = (value_per_share - current_price) / current_price if current_price > 0 else 0
 
     return {
         "scenario": scenario.name,
         "scenario_description": scenario.description,
-        "wacc": wacc,
+        "wacc": avg_wacc,
+        "terminal_wacc": terminal_wacc,
+        "yearly_waccs": yearly_waccs,
+        "rate_path_bp": rate_path[:n],
         "terminal_growth": tg,
         "pv_fcfs": pv_fcfs,
         "pv_fcf_total": pv_fcf_total,
