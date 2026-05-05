@@ -41,11 +41,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python generate_dcf.py AAPL
-  python generate_dcf.py MSFT -o microsoft_dcf.xlsx
-  python generate_dcf.py TSLA --projection-years 7
-  python generate_dcf.py GOOGL --fred-key YOUR_FRED_API_KEY
-  python generate_dcf.py AAPL --sample   # Use sample data (no API calls)
+  python generate_dcf.py AAPL                         # Apple (Yahoo Finance)
+  python generate_dcf.py MSFT -o microsoft_dcf.xlsx   # Custom output file
+  python generate_dcf.py TSLA --projection-years 7    # 7-year projection
+  python generate_dcf.py GOOGL --fred-key YOUR_KEY    # FRED for rates
+  python generate_dcf.py AMZN --av-key YOUR_KEY       # Alpha Vantage fallback
+  python generate_dcf.py AAPL --sample                # Offline sample data
+
+Data Sources (tried in order):
+  1. Yahoo Finance (yfinance) — no API key needed
+  2. Alpha Vantage — free API key at alphavantage.co
+  3. FRED — free API key at fred.stlouisfed.org (interest rates only)
+  4. Built-in sample data — offline fallback
         """
     )
     parser.add_argument("ticker", type=str, help="Stock ticker symbol (e.g., AAPL, MSFT, TSLA)")
@@ -53,6 +60,8 @@ Examples:
                         help="Output Excel file path (default: <TICKER>_DCF_Model.xlsx)")
     parser.add_argument("--fred-key", type=str, default=None,
                         help="FRED API key for interest rate data (free at https://fred.stlouisfed.org/docs/api/api_key.html)")
+    parser.add_argument("--av-key", type=str, default=None,
+                        help="Alpha Vantage API key (free at https://www.alphavantage.co/support/#api-key) — used as fallback if Yahoo Finance is unavailable")
     parser.add_argument("--projection-years", type=int, default=5,
                         help="Number of projection years (default: 5)")
     parser.add_argument("--terminal-growth", type=float, default=0.025,
@@ -74,7 +83,8 @@ Examples:
 
     # Step 1: Fetch data
     print("[1/4] Fetching financial data...")
-    data = fetch_all(ticker, fred_api_key=args.fred_key, force_sample=args.sample)
+    data = fetch_all(ticker, fred_api_key=args.fred_key,
+                     alpha_vantage_key=args.av_key, force_sample=args.sample)
     stock = data["stock"]
     financials = data["financials"]
     rates = data["rates"]
@@ -100,7 +110,7 @@ Examples:
     print(f"       Cost of Debt: {model_result['wacc_data']['cost_of_debt']:.2%}")
 
     # Step 3: Build Excel
-    print("\n[3/4] Building Excel workbook (12 sheets)...")
+    print("\n[3/4] Building Excel workbook (13 sheets)...")
     wb = build_workbook(stock, financials, rates, model_result, source)
 
     # Step 4: Save
@@ -124,7 +134,8 @@ Examples:
     print(f"\n  Output: {os.path.abspath(output)}")
     print(f"  Sheets: Dashboard, Income Statement, Balance Sheet,")
     print(f"          Cash Flow, WACC, 5× DCF Scenarios,")
-    print(f"          Scenario Comparison, Sensitivity Analysis")
+    print(f"          Scenario Comparison, Sensitivity Analysis,")
+    print(f"          Instructions (how to change tickers & use APIs)")
     print(f"{'='*60}\n")
 
     if source == "sample":
